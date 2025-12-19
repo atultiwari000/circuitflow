@@ -1,6 +1,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { tools } from '../../tools';
+import { apiKeyManager } from '../apiKeyManager';
 
 const MODELS_FALLBACK_CHAIN = [
     'gemini-2.5-flash',
@@ -57,14 +58,18 @@ export const generateAgentResponse = async (
     toolConfig: any = { tools: [{ functionDeclarations: tools }] }
 ) => {
     // Initialize inside function to ensure environment variables are loaded
-    const apiKey = process.env.API_KEY;
+    let apiKey = apiKeyManager.getCurrentKey();
     
     if (!apiKey) {
-        console.error("CRITICAL: API_KEY is missing from process.env");
+        apiKey = process.env.API_KEY;
+    }
+    
+    if (!apiKey) {
+        console.error("CRITICAL: API_KEY is missing");
         throw new Error("Configuration Error: API Key is missing.");
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    let ai = new GoogleGenAI({ apiKey });
     let lastError: any = null;
 
     // Start from the last known good model (activeModelIndex)
@@ -102,8 +107,21 @@ export const generateAgentResponse = async (
                 lastError = error;
 
                 if (isRateLimitError(error)) {
+                    console.warn(`Rate limit (429) hit on ${model}.`);
+
+                    // Try rotating key first
+                    const currentKey = apiKeyManager.getCurrentKey();
+                    const newKey = apiKeyManager.rotateKey();
+                    
+                    if (newKey && newKey !== currentKey) {
+                         console.log("Switching API Key...");
+                         ai = new GoogleGenAI({ apiKey: newKey });
+                         // Retry immediately with new key
+                         continue;
+                    }
+
                     const waitTime = extractRetryDelay(error);
-                    console.warn(`Rate limit (429) hit on ${model}. Waiting ${waitTime}ms...`);
+                    console.warn(`Waiting ${waitTime}ms...`);
                     
                     if (retries < MAX_RETRIES_PER_MODEL) {
                         await delay(waitTime);

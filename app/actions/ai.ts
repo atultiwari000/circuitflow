@@ -1,15 +1,16 @@
 
 import { GoogleGenAI, Type } from '@google/genai';
 import { ComponentCategory } from '../../types';
+import { apiKeyManager } from '../../services/apiKeyManager';
 
 // Initialize the API client
 // Ensure API_KEY is present to prevent silent failures
-const apiKey = process.env.API_KEY;
-if (!apiKey) {
-  console.error("API_KEY is missing from environment variables.");
-}
+// const apiKey = process.env.API_KEY;
+// if (!apiKey) {
+//   console.error("API_KEY is missing from environment variables.");
+// }
 
-const ai = new GoogleGenAI({ apiKey: apiKey || 'dummy-key-to-prevent-crash' });
+// const ai = new GoogleGenAI({ apiKey: apiKey || 'dummy-key-to-prevent-crash' });
 
 // Define the interface for the prompt structure
 interface AIComponentResponse {
@@ -25,9 +26,14 @@ interface AIComponentResponse {
 export async function generateComponentFromDatasheet(formData: FormData) {
   console.log("--- Starting Analysis (Gemini 2.5 Flash) ---");
   try {
+    let apiKey = apiKeyManager.getCurrentKey();
+    if (!apiKey) apiKey = process.env.API_KEY;
+
     if (!apiKey) {
         throw new Error("System configuration error: API Key missing.");
     }
+
+    let ai = new GoogleGenAI({ apiKey });
 
     const file = formData.get('datasheet') as File;
     if (!file) {
@@ -65,48 +71,66 @@ export async function generateComponentFromDatasheet(formData: FormData) {
     `;
 
     // Switching to gemini-2.5-flash for speed. It is capable of datasheet extraction.
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: {
-        parts: [
-          { inlineData: { mimeType: file.type, data: base64String } },
-          { text: prompt }
-        ]
-      },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            type: { type: Type.STRING, description: "Unique snake_case identifier" },
-            label: { type: Type.STRING, description: "Display name e.g. 'NE555 Timer'" },
-            description: { type: Type.STRING },
-            symbol: { type: Type.STRING, description: "One of: generic, resistor, capacitor, diode, transistor_npn" },
-            category: { type: Type.STRING, description: "Always return 'REAL_WORLD'" },
-            ports: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  name: { type: Type.STRING }
+    let response;
+    while (true) {
+        try {
+            response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash',
+              contents: {
+                parts: [
+                  { inlineData: { mimeType: file.type, data: base64String } },
+                  { text: prompt }
+                ]
+              },
+              config: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    type: { type: Type.STRING, description: "Unique snake_case identifier" },
+                    label: { type: Type.STRING, description: "Display name e.g. 'NE555 Timer'" },
+                    description: { type: Type.STRING },
+                    symbol: { type: Type.STRING, description: "One of: generic, resistor, capacitor, diode, transistor_npn" },
+                    category: { type: Type.STRING, description: "Always return 'REAL_WORLD'" },
+                    ports: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          id: { type: Type.STRING },
+                          name: { type: Type.STRING }
+                        }
+                      }
+                    },
+                    defaultProperties: {
+                      type: Type.ARRAY,
+                      items: {
+                         type: Type.OBJECT,
+                         properties: {
+                            key: { type: Type.STRING },
+                            value: { type: Type.STRING }
+                         }
+                      }
+                    }
+                  }
                 }
               }
-            },
-            defaultProperties: {
-              type: Type.ARRAY,
-              items: {
-                 type: Type.OBJECT,
-                 properties: {
-                    key: { type: Type.STRING },
-                    value: { type: Type.STRING }
+            });
+            break;
+        } catch (error: any) {
+             if (error.status === 429 || error.message?.includes('429')) {
+                 console.warn("Rate limit hit in generateComponentFromDatasheet");
+                 const newKey = apiKeyManager.rotateKey();
+                 if (newKey && newKey !== apiKey) {
+                     console.log("Switching API Key and retrying...");
+                     apiKey = newKey;
+                     ai = new GoogleGenAI({ apiKey });
+                     continue;
                  }
-              }
-            }
-          }
+             }
+             throw error;
         }
-      }
-    });
+    }
 
     console.log("Gemini response received.");
 

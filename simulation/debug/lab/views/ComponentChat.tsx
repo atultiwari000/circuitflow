@@ -5,6 +5,7 @@ import { CircuitComponent, ComponentDefinition } from '../../../../types';
 import { ComponentReport } from '../../../analyzers/ComponentReporter';
 import { GoogleGenAI } from '@google/genai';
 import { componentChatTools } from '../tools';
+import { apiKeyManager } from '../../../../services/apiKeyManager';
 import MarkdownIt from 'markdown-it';
 import mk from 'markdown-it-katex';
 
@@ -53,26 +54,43 @@ export const ComponentChat: React.FC<ComponentChatProps> = ({ component, definit
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, isThinking]);
 
-    const generateWithFallback = async (ai: GoogleGenAI, requestParams: any) => {
+    const generateWithFallback = async (requestParams: any) => {
         let lastError = null;
+        let apiKey = apiKeyManager.getCurrentKey();
+        if (!apiKey) apiKey = process.env.API_KEY;
+        
+        if (!apiKey) throw new Error("API Key missing");
+
+        let ai = new GoogleGenAI({ apiKey });
+
         for (const model of MODEL_CHAIN) {
-            try {
-                // console.log(`Attempting generation with ${model}...`);
-                return await ai.models.generateContent({
-                    model,
-                    ...requestParams
-                });
-            } catch (e: any) {
-                lastError = e;
-                const isRateLimit = e.status === 429 || 
-                                    (e.message && e.message.toLowerCase().includes('resource exhausted')) ||
-                                    (e.error && e.error.code === 429);
-                
-                if (isRateLimit) {
-                    console.warn(`[ComponentChat] Rate limit on ${model}. Switching fallback...`);
-                    continue;
+            while (true) {
+                try {
+                    // console.log(`Attempting generation with ${model}...`);
+                    return await ai.models.generateContent({
+                        model,
+                        ...requestParams
+                    });
+                } catch (e: any) {
+                    lastError = e;
+                    const isRateLimit = e.status === 429 || 
+                                        (e.message && e.message.toLowerCase().includes('resource exhausted')) ||
+                                        (e.error && e.error.code === 429);
+                    
+                    if (isRateLimit) {
+                        console.warn(`[ComponentChat] Rate limit on ${model}.`);
+                        const newKey = apiKeyManager.rotateKey();
+                        if (newKey && newKey !== apiKey) {
+                             console.log("Switching API Key...");
+                             apiKey = newKey;
+                             ai = new GoogleGenAI({ apiKey });
+                             continue;
+                        }
+                        console.warn(`Switching fallback model...`);
+                        break;
+                    }
+                    throw e; // Re-throw other errors (e.g. Safety, Invalid Arg)
                 }
-                throw e; // Re-throw other errors (e.g. Safety, Invalid Arg)
             }
         }
         throw lastError;
@@ -88,11 +106,6 @@ export const ComponentChat: React.FC<ComponentChatProps> = ({ component, definit
         setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
 
         try {
-            const apiKey = process.env.API_KEY;
-            if (!apiKey) throw new Error("API Key missing");
-
-            const ai = new GoogleGenAI({ apiKey });
-            
             // Build Context
             const systemPrompt = `
                 You are a dedicated electronics analysis assistant for a specific component on a circuit board.
@@ -125,7 +138,7 @@ export const ComponentChat: React.FC<ComponentChatProps> = ({ component, definit
             history.push({ role: 'user', parts: [{ text: userMsg }] });
 
             // Generate with Fallback
-            const response = await generateWithFallback(ai, {
+            const response = await generateWithFallback({
                 contents: history,
                 config: {
                     systemInstruction: systemPrompt,
